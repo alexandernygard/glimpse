@@ -25,6 +25,14 @@ The main window has a timeline grouped by day and a sidebar of categories, each 
 
 In the main window you can rename a capture (click its title), change its category, re-run Claude, copy it as text, or delete it (⌫, or right-click a row). Captures that failed or were skipped get a "Retry All" banner, also under the Claude menu. File → Export All as Markdown (⇧⌘E) writes a Markdown file with the screenshots copied into a folder next to it. Settings has a Launch at login toggle.
 
+## Install
+
+```sh
+brew install --cask alexandernygard/tap/glimpse
+```
+
+Pushing a tag like `v0.2.0` builds a universal app, publishes it as a GitHub release and updates the cask (`.github/workflows/release.yml`).
+
 ## Build and run
 
 Requires macOS 14 or later and the Swift toolchain (Command Line Tools are enough, Xcode is not required).
