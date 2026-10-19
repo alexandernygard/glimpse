@@ -1,12 +1,12 @@
 import Foundation
 
-enum CaptureKind: String, Codable {
+enum CaptureKind: String, Codable, Sendable {
     case screenshot
     case note
 }
 
 /// The fixed set of buckets a capture can land in. Order matters: it defines the ⌘1…⌘6 hotkeys.
-enum Category: String, Codable, CaseIterable, Identifiable {
+enum Category: String, Codable, CaseIterable, Identifiable, Sendable {
     case todo
     case followUp
     case important
@@ -59,19 +59,26 @@ enum Category: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-enum CategorySource: String, Codable {
+enum CategorySource: String, Codable, Sendable {
     case manual
     case ai
 }
 
-enum AIStatus: Codable, Equatable {
+enum AIStatus: Codable, Equatable, Sendable {
     case pending
     case done
     case skipped
     case failed(String)
+
+    var isUnfinished: Bool {
+        switch self {
+        case .failed, .skipped: return true
+        case .pending, .done: return false
+        }
+    }
 }
 
-struct AIEnrichment: Codable, Equatable {
+struct AIEnrichment: Codable, Equatable, Sendable {
     var title: String
     var summary: String
     var suggestedCategory: Category
@@ -80,7 +87,7 @@ struct AIEnrichment: Codable, Equatable {
     var actionItems: [String]
 }
 
-struct Capture: Identifiable, Codable, Equatable {
+struct Capture: Identifiable, Codable, Equatable, Sendable {
     var id: UUID = UUID()
     var createdAt: Date = Date()
     var kind: CaptureKind
@@ -92,7 +99,11 @@ struct Capture: Identifiable, Codable, Equatable {
     var ai: AIEnrichment?
     var aiStatus: AIStatus = .pending
 
+    /// User-edited title; wins over Claude's.
+    var customTitle: String?
+
     var displayTitle: String {
+        if let t = customTitle, !t.isEmpty { return t }
         if let t = ai?.title, !t.isEmpty { return t }
         let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
         if !firstLine.isEmpty { return firstLine }
@@ -103,7 +114,7 @@ struct Capture: Identifiable, Codable, Equatable {
         if let s = ai?.summary, !s.isEmpty { return s }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return nil }
-        if ai?.title == nil {
+        if ai?.title == nil && (customTitle ?? "").isEmpty {
             // Title already shows the first line; show the rest if any.
             let lines = trimmed.split(whereSeparator: \.isNewline).dropFirst()
             let rest = lines.joined(separator: " ")

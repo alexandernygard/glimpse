@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 extension Category {
     var color: Color {
@@ -79,7 +80,7 @@ struct AIStatusIndicator: View {
 }
 
 struct Thumbnail: View {
-    @EnvironmentObject var store: CaptureStore
+    @Environment(CaptureStore.self) private var store
     let capture: Capture
 
     var body: some View {
@@ -118,5 +119,53 @@ enum DayFormat {
             return day.formatted(.dateTime.year())
         }
         return ""
+    }
+}
+
+extension Capture {
+    /// Plain-text rendering for the pasteboard: title, note, summary, action items, extracted text.
+    var plainText: String {
+        var parts = [displayTitle]
+        let note = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !note.isEmpty { parts.append(note) }
+        if let ai {
+            if !ai.summary.isEmpty { parts.append(ai.summary) }
+            if !ai.actionItems.isEmpty { parts.append(ai.actionItems.map { "- \($0)" }.joined(separator: "\n")) }
+            if !ai.extractedText.isEmpty { parts.append(ai.extractedText) }
+        }
+        return parts.joined(separator: "\n\n")
+    }
+
+    @MainActor
+    func copyAsText() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(plainText, forType: .string)
+    }
+}
+
+private struct ConfirmDeleteCapture: ViewModifier {
+    @Environment(CaptureStore.self) private var store
+    @Binding var capture: Capture?
+    var onDelete: () -> Void
+
+    func body(content: Content) -> some View {
+        content.confirmationDialog(
+            "Delete \u{201C}\(capture?.displayTitle ?? "")\u{201D}?",
+            isPresented: Binding(get: { capture != nil }, set: { if !$0 { capture = nil } }),
+            presenting: capture
+        ) { c in
+            Button("Delete", role: .destructive) {
+                store.delete(c)
+                onDelete()
+            }
+        } message: { c in
+            Text(c.imageFilename == nil ? "This can't be undone." : "The screenshot file is deleted too. This can't be undone.")
+        }
+    }
+}
+
+extension View {
+    func confirmDeleteCapture(_ capture: Binding<Capture?>, onDelete: @escaping () -> Void = {}) -> some View {
+        modifier(ConfirmDeleteCapture(capture: capture, onDelete: onDelete))
     }
 }

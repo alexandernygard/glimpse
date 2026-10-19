@@ -6,11 +6,16 @@ enum SidebarItem: Hashable {
 }
 
 struct MainView: View {
-    @EnvironmentObject var store: CaptureStore
-    @EnvironmentObject var settings: AppSettings
+    @Environment(CaptureStore.self) private var store
+    @Environment(AppSettings.self) private var settings
     @State private var selection: SidebarItem? = .timeline
     @State private var selectedCaptureID: UUID?
     @State private var searchText = ""
+    @State private var pendingDelete: Capture?
+
+    private var unfinishedCount: Int {
+        store.captures.filter { $0.aiStatus.isUnfinished }.count
+    }
 
     private var filtered: [Capture] {
         store.captures.filter { $0.matches(search: searchText) }
@@ -42,7 +47,7 @@ struct MainView: View {
             Group {
                 switch selection ?? .timeline {
                 case .timeline:
-                    TimelineList(captures: filtered, selection: $selectedCaptureID)
+                    TimelineList(captures: filtered, selection: $selectedCaptureID, searching: !searchText.isEmpty)
                         .navigationTitle("Timeline")
                 case .category(let cat):
                     CategoryList(category: cat, captures: filtered.filter { $0.category == cat }, selection: $selectedCaptureID)
@@ -82,8 +87,16 @@ struct MainView: View {
         .safeAreaInset(edge: .bottom) {
             if settings.apiKey == nil && settings.enrichmentEnabled {
                 MissingKeyBanner()
+            } else if settings.apiKey != nil && settings.enrichmentEnabled && unfinishedCount > 0 {
+                RetryBanner(count: unfinishedCount)
             }
         }
+        .onDeleteCommand {
+            if let id = selectedCaptureID, let c = store.capture(id: id) {
+                pendingDelete = c
+            }
+        }
+        .confirmDeleteCapture($pendingDelete) { selectedCaptureID = nil }
         .onChange(of: selection) { _, _ in
             selectedCaptureID = nil
         }
@@ -107,9 +120,27 @@ struct MissingKeyBanner: View {
     }
 }
 
+struct RetryBanner: View {
+    let count: Int
+
+    var body: some View {
+        HStack {
+            Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+            Text(count == 1 ? "1 capture hasn't been organized by Claude." : "\(count) captures haven't been organized by Claude.")
+                .font(.callout)
+            Spacer()
+            Button("Retry All") { Enricher.shared.retryUnfinished() }
+        }
+        .padding(10)
+        .background(.thinMaterial)
+        .overlay(alignment: .top) { Divider() }
+    }
+}
+
 struct TimelineList: View {
     let captures: [Capture]
     @Binding var selection: UUID?
+    var searching = false
 
     var body: some View {
         let groups = CaptureStore.groupByDay(captures)
@@ -138,7 +169,9 @@ struct TimelineList: View {
         }
         .listStyle(.inset)
         .overlay {
-            if captures.isEmpty {
+            if captures.isEmpty && searching {
+                ContentUnavailableView.search
+            } else if captures.isEmpty {
                 ContentUnavailableView {
                     Label("No captures yet", systemImage: "camera.viewfinder")
                 } description: {
@@ -184,8 +217,10 @@ struct CategoryList: View {
 }
 
 struct CaptureRow: View {
+    @Environment(CaptureStore.self) private var store
     let capture: Capture
     var showDate: Bool = false
+    @State private var pendingDelete: Capture?
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -221,5 +256,20 @@ struct CaptureRow: View {
             }
         }
         .padding(.vertical, 4)
+        .contextMenu {
+            Button("Re-run Claude", systemImage: "arrow.clockwise") { Enricher.shared.enrich(id: capture.id) }
+            Menu("Category") {
+                ForEach(Category.allCases) { cat in
+                    Button(cat.title) { store.setCategory(cat, for: capture.id, source: .manual) }
+                }
+                Divider()
+                Button("None") { store.setCategory(nil, for: capture.id, source: .manual) }
+            }
+            Button("Copy as Text", systemImage: "doc.on.doc") { capture.copyAsText() }
+            Button("Export as Markdown…", systemImage: "square.and.arrow.up") { Exporter.exportMarkdown([capture]) }
+            Divider()
+            Button("Delete…", systemImage: "trash", role: .destructive) { pendingDelete = capture }
+        }
+        .confirmDeleteCapture($pendingDelete)
     }
 }

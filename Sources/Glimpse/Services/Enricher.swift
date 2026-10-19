@@ -12,6 +12,13 @@ final class Enricher {
         }
     }
 
+    /// Re-sends every capture that failed or was skipped (e.g. after adding a key or coming back online).
+    func retryUnfinished() {
+        for c in CaptureStore.shared.captures where c.aiStatus.isUnfinished {
+            enrich(id: c.id)
+        }
+    }
+
     func enrich(id: UUID) {
         guard !inFlight.contains(id) else { return }
         let store = CaptureStore.shared
@@ -39,7 +46,8 @@ final class Enricher {
                 guard var c = store.capture(id: id) else { return }
                 c.ai = result
                 c.aiStatus = .done
-                if c.category == nil {
+                // Claude's pick replaces an earlier Claude pick, never a manual one.
+                if c.category == nil || c.categorySource == .ai {
                     c.category = result.suggestedCategory
                     c.categorySource = .ai
                 }

@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 
 struct CaptureView: View {
-    @ObservedObject var draft: CaptureDraft
+    @Bindable var draft: CaptureDraft
     var onSubmit: () -> Void
     var onCancel: () -> Void
 

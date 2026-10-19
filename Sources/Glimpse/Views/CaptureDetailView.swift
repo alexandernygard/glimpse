@@ -2,9 +2,12 @@ import SwiftUI
 import AppKit
 
 struct CaptureDetailView: View {
-    @EnvironmentObject var store: CaptureStore
+    @Environment(CaptureStore.self) private var store
     let capture: Capture
     @State private var noteDraft: String = ""
+    @State private var titleDraft: String = ""
+    @State private var pendingDelete: Capture?
+    @FocusState private var titleFocused: Bool
 
     var body: some View {
         ScrollView {
@@ -23,9 +26,13 @@ struct CaptureDetailView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(capture.displayTitle)
+                    TextField("Title", text: $titleDraft, axis: .vertical)
                         .font(.title2.weight(.semibold))
-                        .textSelection(.enabled)
+                        .textFieldStyle(.plain)
+                        .focused($titleFocused)
+                        .onSubmit { commitTitle() }
+                        .onChange(of: titleFocused) { _, focused in if !focused { commitTitle() } }
+                        .help("Click to rename")
                     HStack(spacing: 6) {
                         Text(capture.createdAt.formatted(date: .complete, time: .shortened))
                         if let app = capture.sourceApp {
@@ -75,9 +82,14 @@ struct CaptureDetailView: View {
 
                 HStack {
                     Button(role: .destructive) {
-                        store.delete(capture)
+                        pendingDelete = capture
                     } label: {
-                        Label("Delete", systemImage: "trash")
+                        Label("Delete…", systemImage: "trash")
+                    }
+                    Button {
+                        capture.copyAsText()
+                    } label: {
+                        Label("Copy Text", systemImage: "doc.plaintext")
                     }
                     if let f = capture.imageFilename {
                         Button {
@@ -99,7 +111,21 @@ struct CaptureDetailView: View {
             }
             .padding(20)
         }
-        .onAppear { noteDraft = capture.text }
+        .onAppear {
+            noteDraft = capture.text
+            titleDraft = capture.displayTitle
+        }
+        .onChange(of: capture.displayTitle) { _, new in
+            if !titleFocused { titleDraft = new }
+        }
+        .onDisappear { commitTitle() }
+        .confirmDeleteCapture($pendingDelete)
+    }
+
+    private func commitTitle() {
+        guard titleDraft != capture.displayTitle else { return }
+        store.setTitle(titleDraft, for: capture.id)
+        titleDraft = store.capture(id: capture.id)?.displayTitle ?? titleDraft
     }
 
     @ViewBuilder
@@ -114,7 +140,7 @@ struct CaptureDetailView: View {
 }
 
 struct AISection: View {
-    @EnvironmentObject var settings: AppSettings
+    @Environment(AppSettings.self) private var settings
     let capture: Capture
 
     var body: some View {

@@ -2,12 +2,13 @@ import SwiftUI
 import AppKit
 
 struct SettingsView: View {
-    @EnvironmentObject var settings: AppSettings
-    @EnvironmentObject var store: CaptureStore
+    @Environment(AppSettings.self) private var settings
+    @Environment(CaptureStore.self) private var store
     @State private var keyDraft: String = ""
     @State private var savedFlash = false
 
     var body: some View {
+        @Bindable var settings = settings
         Form {
             Section("Claude") {
                 HStack {
@@ -16,7 +17,10 @@ struct SettingsView: View {
                     Button(savedFlash ? "Saved" : "Save") {
                         settings.saveAPIKey(keyDraft)
                         savedFlash = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { savedFlash = false }
+                        Task {
+                            try? await Task.sleep(for: .seconds(1.2))
+                            savedFlash = false
+                        }
                     }
                     .disabled(keyDraft.isEmpty && settings.apiKey == nil)
                 }
@@ -29,7 +33,24 @@ struct SettingsView: View {
                         Text(m.name).tag(m.id)
                     }
                 }
+                if let m = AppSettings.models.first(where: { $0.id == settings.model }) {
+                    Text(m.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Toggle("Let Claude title, summarize, and categorize captures", isOn: $settings.enrichmentEnabled)
+            }
+
+            Section("General") {
+                Toggle("Launch Glimpse at login", isOn: Binding(
+                    get: { settings.launchAtLogin },
+                    set: { settings.setLaunchAtLogin($0) }
+                ))
+                if let err = settings.launchAtLoginError {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
 
             Section("Hotkeys") {
@@ -41,7 +62,13 @@ struct SettingsView: View {
             }
 
             Section("Storage") {
-                LabeledContent("Captures", value: "\(store.captures.count)")
+                LabeledContent("Captures") {
+                    HStack {
+                        Text("\(store.captures.count)")
+                        Button("Export as Markdown…") { Exporter.exportMarkdown(store.captures) }
+                            .disabled(store.captures.isEmpty)
+                    }
+                }
                 HStack {
                     Text(store.rootURL.path)
                         .font(.caption.monospaced())
@@ -64,15 +91,16 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 520)
         .onAppear {
-            if settings.apiKeySource == "keychain" { keyDraft = settings.apiKey ?? "" }
+            if settings.apiKeySource == .keychain { keyDraft = settings.apiKey ?? "" }
+            settings.refreshLaunchAtLogin()
         }
     }
 
     private var keyStatus: String {
         switch settings.apiKeySource {
-        case "keychain": return "Key stored in your login Keychain."
-        case "environment": return "Using ANTHROPIC_API_KEY from the environment. Save a key here to override."
-        default: return "No key set. Captures are stored but not organized until you add one."
+        case .keychain: return "Key stored in your login Keychain."
+        case .environment: return "Using ANTHROPIC_API_KEY from the environment. Save a key here to override."
+        case .none: return "No key set. Captures are stored but not organized until you add one."
         }
     }
 }

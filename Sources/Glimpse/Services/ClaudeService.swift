@@ -2,15 +2,25 @@ import Foundation
 import AppKit
 
 enum ClaudeError: LocalizedError {
+    case invalidKey
+    case rateLimited
+    case overloaded
+    case offline
     case http(Int, String)
     case refusal(String)
+    case truncated
     case noText
     case badJSON(String)
 
     var errorDescription: String? {
         switch self {
+        case .invalidKey: return "Your Anthropic API key was rejected. Check it in Settings."
+        case .rateLimited: return "Rate limited by the Anthropic API. Try again in a minute."
+        case .overloaded: return "The Anthropic API is busy right now. Try again shortly."
+        case .offline: return "Couldn't reach the Anthropic API. Check your internet connection."
         case .http(let code, let msg): return "API error \(code): \(msg)"
         case .refusal(let why): return "Claude declined this request: \(why)"
+        case .truncated: return "Claude's response was cut off before it finished."
         case .noText: return "Claude returned no text."
         case .badJSON(let raw): return "Could not parse Claude's response: \(raw.prefix(200))"
         }
@@ -20,6 +30,7 @@ enum ClaudeError: LocalizedError {
 /// Raw Messages API client. Anthropic has no official Swift SDK, so this talks HTTP directly.
 enum ClaudeService {
     private static let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
+    private static let fallbackBeta = "server-side-fallback-2026-07-01"
 
     static func enrich(capture: Capture, imageData: Data?, apiKey: String, model: String) async throws -> AIEnrichment {
         var content: [[String: Any]] = []
@@ -37,10 +48,11 @@ enum ClaudeService {
 
         var body: [String: Any] = [
             "model": model,
-            "max_tokens": 2048,
+            // Thinking is adaptive (on by default) on all offered models and counts toward this cap.
+            "max_tokens": 16000,
             "system": systemPrompt,
             "messages": [["role": "user", "content": content]],
-            "output_config": outputConfig(for: model),
+            "output_config": outputConfig,
         ]
         var headers = [
             "content-type": "application/json",
@@ -48,11 +60,12 @@ enum ClaudeService {
             "anthropic-version": "2023-06-01",
         ]
 
-        // Fable can decline via safety classifiers; server-side fallback reruns on another model.
-        let useFallback = model.hasPrefix("claude-fable")
+        // Sonnet 5.5 and Opus 5.5 can decline via safety classifiers; server-side fallback reruns
+        // eligible declines on another model. Haiku 5.5 has no server-side fallback.
+        let useFallback = !model.contains("haiku")
         if useFallback {
             body["fallbacks"] = "default"
-            headers["anthropic-beta"] = "server-side-fallback-2026-07-01"
+            headers["anthropic-beta"] = fallbackBeta
         }
 
         do {
@@ -71,22 +84,41 @@ enum ClaudeService {
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch let error as URLError where [.notConnectedToInternet, .networkConnectionLost, .cannotFindHost,
+                                            .cannotConnectToHost, .timedOut, .dnsLookupFailed].contains(error.code) {
+            throw ClaudeError.offline
+        }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         let json = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
 
         guard (200..<300).contains(status) else {
-            let msg = ((json["error"] as? [String: Any])?["message"] as? String)
-                ?? String(data: data, encoding: .utf8)
-                ?? "Unknown error"
-            throw ClaudeError.http(status, msg)
+            switch status {
+            case 401, 403: throw ClaudeError.invalidKey
+            case 429: throw ClaudeError.rateLimited
+            case 500, 503, 529: throw ClaudeError.overloaded
+            default:
+                let msg = ((json["error"] as? [String: Any])?["message"] as? String)
+                    ?? String(data: data, encoding: .utf8)
+                    ?? "Unknown error"
+                throw ClaudeError.http(status, msg)
+            }
         }
 
-        if json["stop_reason"] as? String == "refusal" {
+        switch json["stop_reason"] as? String {
+        case "refusal":
             let why = ((json["stop_details"] as? [String: Any])?["explanation"] as? String) ?? "no explanation given"
             throw ClaudeError.refusal(why)
+        case "max_tokens":
+            throw ClaudeError.truncated
+        default:
+            break
         }
 
+        // Responses may start with thinking blocks; the structured output is in the text block.
         guard let blocks = json["content"] as? [[String: Any]],
               let text = blocks.first(where: { $0["type"] as? String == "text" })?["text"] as? String
         else { throw ClaudeError.noText }
@@ -123,11 +155,8 @@ enum ClaudeService {
     }()
 
     private static func userPrompt(for capture: Capture) -> String {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .full
-        formatter.timeStyle = .short
         var lines: [String] = []
-        lines.append("Captured: \(formatter.string(from: capture.createdAt))")
+        lines.append("Captured: \(capture.createdAt.formatted(date: .complete, time: .shortened))")
         lines.append("Kind: \(capture.kind == .screenshot ? "screenshot (image attached)" : "typed note")")
         if let app = capture.sourceApp { lines.append("Frontmost app at capture time: \(app)") }
         let note = capture.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -140,7 +169,7 @@ enum ClaudeService {
         return lines.joined(separator: "\n")
     }
 
-    private static func outputConfig(for model: String) -> [String: Any] {
+    private static var outputConfig: [String: Any] {
         let schema: [String: Any] = [
             "type": "object",
             "properties": [
@@ -154,10 +183,8 @@ enum ClaudeService {
             "required": ["title", "summary", "suggestedCategory", "tags", "extractedText", "actionItems"],
             "additionalProperties": false,
         ]
-        var cfg: [String: Any] = ["format": ["type": "json_schema", "schema": schema]]
-        // Effort is unsupported on Haiku 4.5; low keeps captures snappy everywhere else.
-        if !model.contains("haiku") { cfg["effort"] = "low" }
-        return cfg
+        // Low effort keeps captures snappy; all offered models support it and think less at this level.
+        return ["format": ["type": "json_schema", "schema": schema], "effort": "low"]
     }
 }
 
