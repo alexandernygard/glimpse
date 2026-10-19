@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Observation
 
 struct DayGroup: Identifiable {
     let day: Date
@@ -8,23 +9,24 @@ struct DayGroup: Identifiable {
 }
 
 @MainActor
-final class CaptureStore: ObservableObject {
+@Observable
+final class CaptureStore {
     static let shared = CaptureStore()
 
-    @Published private(set) var captures: [Capture] = []
+    private(set) var captures: [Capture] = []
 
     let rootURL: URL
     let imagesURL: URL
     let dbURL: URL
 
-    private let encoder: JSONEncoder = {
+    @ObservationIgnored private let encoder: JSONEncoder = {
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
         return e
     }()
 
-    private let decoder: JSONDecoder = {
+    @ObservationIgnored private let decoder: JSONDecoder = {
         let d = JSONDecoder()
         d.dateDecodingStrategy = .iso8601
         return d
@@ -108,10 +110,64 @@ final class CaptureStore: ObservableObject {
         update(c)
     }
 
+    func setTitle(_ title: String, for id: UUID) {
+        guard var c = capture(id: id) else { return }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let new: String? = trimmed.isEmpty || trimmed == c.ai?.title ? nil : trimmed
+        guard c.customTitle != new else { return }
+        c.customTitle = new
+        update(c)
+    }
+
     func setText(_ text: String, for id: UUID) {
         guard var c = capture(id: id), c.text != text else { return }
         c.text = text
         update(c)
+    }
+
+    // MARK: Export
+
+    /// Writes captures as a Markdown file plus a sibling folder of the referenced images.
+    func exportMarkdown(_ items: [Capture], to url: URL) throws {
+        let assetsName = url.deletingPathExtension().lastPathComponent + " images"
+        let assetsURL = url.deletingLastPathComponent().appendingPathComponent(assetsName, isDirectory: true)
+        let fm = FileManager.default
+        if items.contains(where: { $0.imageFilename != nil }) {
+            try fm.createDirectory(at: assetsURL, withIntermediateDirectories: true)
+        }
+
+        var md = "# Glimpse export\n\nExported \(Date().formatted(date: .long, time: .shortened)), \(items.count) captures.\n"
+        for group in Self.groupByDay(items) {
+            md += "\n## \(group.day.formatted(date: .complete, time: .omitted))\n"
+            for c in group.items {
+                md += "\n### \(c.displayTitle)\n\n"
+                var meta = [c.createdAt.formatted(date: .omitted, time: .shortened)]
+                if let cat = c.category { meta.append(cat.title) }
+                if let app = c.sourceApp { meta.append(app) }
+                if let tags = c.ai?.tags, !tags.isEmpty { meta.append(tags.map { "#\($0)" }.joined(separator: " ")) }
+                md += "_\(meta.joined(separator: " · "))_\n"
+                if let f = c.imageFilename {
+                    let dest = assetsURL.appendingPathComponent(f)
+                    if !fm.fileExists(atPath: dest.path) {
+                        try? fm.copyItem(at: imageURL(filename: f), to: dest)
+                    }
+                    let rel = "\(assetsName)/\(f)".addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? f
+                    md += "\n![](\(rel))\n"
+                }
+                let note = c.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !note.isEmpty { md += "\n\(note)\n" }
+                if let ai = c.ai {
+                    if !ai.summary.isEmpty { md += "\n> \(ai.summary)\n" }
+                    if !ai.actionItems.isEmpty {
+                        md += "\n" + ai.actionItems.map { "- [ ] \($0)" }.joined(separator: "\n") + "\n"
+                    }
+                    if !ai.extractedText.isEmpty {
+                        md += "\n<details><summary>Text from screenshot</summary>\n\n```\n\(ai.extractedText)\n```\n</details>\n"
+                    }
+                }
+            }
+        }
+        try md.write(to: url, atomically: true, encoding: .utf8)
     }
 
     // MARK: Queries
@@ -133,10 +189,10 @@ final class CaptureStore: ObservableObject {
 }
 
 /// Small in-memory cache so list rows don't hit disk on every redraw.
+@MainActor
 final class ImageCache {
     static let shared = ImageCache()
     private let cache = NSCache<NSString, NSImage>()
-    private let queue = DispatchQueue(label: "glimpse.imagecache")
 
     init() { cache.countLimit = 300 }
 

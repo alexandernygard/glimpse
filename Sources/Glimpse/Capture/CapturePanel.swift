@@ -1,14 +1,16 @@
 import AppKit
 import SwiftUI
+import Observation
 
 @MainActor
-final class CaptureDraft: ObservableObject {
+@Observable
+final class CaptureDraft {
     let kind: CaptureKind
     let image: NSImage?
     let imageData: Data?
     let sourceApp: String?
-    @Published var text: String = ""
-    @Published var category: Category?
+    var text: String = ""
+    var category: Category?
 
     init(kind: CaptureKind, image: NSImage?, imageData: Data?, sourceApp: String?) {
         self.kind = kind
